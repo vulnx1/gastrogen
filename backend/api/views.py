@@ -103,6 +103,106 @@ class WearableDataViewSet(viewsets.ModelViewSet):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 @csrf_exempt
+def generate_recipe(request):
+    """Generate a structured recipe using Ollama (text-only) based on user inputs."""
+    body = request.data or {}
+    prompt_text = (body.get("prompt") or "").strip()
+    ingredients = body.get("ingredients") or []
+    dietary = (body.get("dietaryPreference") or "").strip()
+    health = body.get("healthData") or {}
+
+    json_schema_hint = {
+        "id": "string",
+        "title": "string",
+        "image": "string",
+        "cookTime": 30,
+        "servings": 2,
+        "difficulty": "Easy",
+        "calories": 450,
+        "cost": 10,
+        "ingredients": ["string"],
+        "instructions": ["string"],
+        "nutrition": {
+            "protein": 25,
+            "carbs": 35,
+            "fat": 12,
+            "fiber": 6,
+            "sugar": 5,
+            "sodium": 300
+        },
+        "tags": ["string"]
+    }
+
+    user_ctx_lines = []
+    if prompt_text:
+        user_ctx_lines.append(f"User request: {prompt_text}")
+    if ingredients:
+        user_ctx_lines.append("Available ingredients: " + ", ".join(ingredients))
+    if dietary:
+        user_ctx_lines.append(f"Dietary preference: {dietary}")
+    if isinstance(health, dict) and health.get("bmiCategory"):
+        user_ctx_lines.append(f"Health BMI Category: {health.get('bmiCategory')}")
+    if isinstance(health, dict) and health.get("foodAllergies"):
+        user_ctx_lines.append("Allergies: " + ", ".join(health.get("foodAllergies") or []))
+
+    instruction = (
+        "You are a culinary assistant. Generate healthy, tasty recipes. "
+        "Return STRICT JSON only (no markdown, no comments) matching the given schema. "
+        "Units: cookTime in minutes (integer), nutrition values are grams except sodium in mg, calories as integer.\n\n"
+        f"Schema example (types/keys to follow):\n{json.dumps(json_schema_hint, ensure_ascii=False)}\n\n"
+        f"Context:\n{os.linesep.join(user_ctx_lines) if user_ctx_lines else 'Create a balanced healthy lunch recipe.'}\n\n"
+        "Respond with JSON only."
+    )
+
+    llm = Ollama(model="llama3")
+    raw = llm(instruction)
+
+    def parse_json_strict(s: str):
+        try:
+            return json.loads(s)
+        except Exception:
+            m = re.search(r"\{[\s\S]*\}", s)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except Exception:
+                    return None
+            return None
+
+    def coerce_int(v, default=0):
+        try:
+            return int(round(float(v)))
+        except Exception:
+            return default
+
+    data = parse_json_strict(raw) or {}
+    recipe = {
+        "id": str(data.get("id") or "local-" + str(Recipe.objects.count() + 1)),
+        "title": data.get("title") or "AI Generated Recipe",
+        "image": data.get("image") or "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=1080&q=80&auto=format&fit=crop",
+        "cookTime": coerce_int(data.get("cookTime"), 30),
+        "servings": coerce_int(data.get("servings"), 2),
+        "difficulty": data.get("difficulty") or "Easy",
+        "calories": coerce_int(data.get("calories"), 450),
+        "cost": coerce_int(data.get("cost"), 10),
+        "ingredients": data.get("ingredients") or [],
+        "instructions": data.get("instructions") or [],
+        "nutrition": {
+            "protein": coerce_int((data.get("nutrition") or {}).get("protein"), 25),
+            "carbs": coerce_int((data.get("nutrition") or {}).get("carbs"), 35),
+            "fat": coerce_int((data.get("nutrition") or {}).get("fat"), 12),
+            "fiber": coerce_int((data.get("nutrition") or {}).get("fiber"), 6),
+            "sugar": coerce_int((data.get("nutrition") or {}).get("sugar"), 5),
+            "sodium": coerce_int((data.get("nutrition") or {}).get("sodium"), 300),
+        },
+        "tags": data.get("tags") or ([dietary] if dietary else ["Balanced"]),
+    }
+
+    return Response(recipe)
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@csrf_exempt
 def generate_recipe_from_image(request):
     """Generate a recipe from an uploaded image using an Ollama vision model.
 
@@ -125,11 +225,11 @@ def generate_recipe_from_image(request):
     ollama_host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
     prompt = (
-        "You are a culinary vision assistant. Look at the image and infer the most likely dish "
-        "or list of ingredients. Then produce a complete recipe as STRICT JSON only, following this schema: "
+        "You are a culinary vision assistant. Look at the image and infer the most likely dish or list of ingredients. "
+        "Then produce a complete recipe as STRICT JSON only, following this schema: "
         '{"id":"string","title":"string","image":"string","cookTime":30,"servings":2,"difficulty":"Easy",'
         '"calories":450,"cost":10,"ingredients":["string"],"instructions":["string"],"nutrition":{"protein":25,"carbs":35,'
-        '"fat":12,"fiber":6,"sugar":5,"sodium":300},"tags":["string"]}'. \
+        '"fat":12,"fiber":6,"sugar":5,"sodium":300},"tags":["string"]}. '
         "Do not include any text outside JSON. Use a representative Unsplash image URL for the image field."
     )
 
